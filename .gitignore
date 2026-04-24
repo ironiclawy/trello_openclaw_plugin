@@ -1,0 +1,29 @@
+# Node dependencies
+node_modules/
+
+# Build output
+dist/
+coverage/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and caches
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+.tmp/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Runtime artifacts
+media/
+*.bak

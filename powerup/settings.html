@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenClaw Stats Settings</title>
+    <link rel="stylesheet" href="https://p.trellocdn.com/power-up.min.css" />
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+      }
+      .field {
+        margin-bottom: 10px;
+      }
+      .field label {
+        display: block;
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+      .field input {
+        width: 100%;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .hint {
+        font-size: 12px;
+        color: #5e6c84;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 13px;
+      }
+      .error {
+        color: #ae2a19;
+      }
+      .ok {
+        color: #216e4e;
+      }
+    </style>
+    <script src="https://p.trellocdn.com/power-up.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="field">
+        <label for="statsUrl">Stats endpoint URL</label>
+        <input id="statsUrl" type="url" placeholder="https://openclaw.example.com/trello/powerup/stats" />
+      </div>
+      <div class="field">
+        <label for="statsToken">Stats token (optional)</label>
+        <input id="statsToken" type="text" placeholder="optional token" />
+      </div>
+      <div class="field">
+        <label for="instanceName">Instance label (optional)</label>
+        <input id="instanceName" type="text" placeholder="Home OpenClaw" />
+      </div>
+      <div class="field">
+        <label for="setupCardId">Setup card ID (for import)</label>
+        <input id="setupCardId" type="text" placeholder="paste card id from setup card" />
+      </div>
+      <div class="field">
+        <label>Automation agent members (one active per card enforced)</label>
+        <div class="row" style="margin-top: 0; margin-bottom: 6px;">
+          <button id="refreshMembersBtn" type="button">Refresh Members</button>
+        </div>
+        <div class="hint">Refresh Members pulls current board members so you can mark which accounts are automation agents. Saved agent IDs are used to enforce one automation agent assignment per card.</div>
+        <div id="membersStatus" class="hint" style="margin-top: 6px;">Set Stats endpoint URL, then click Refresh Members.</div>
+        <div id="memberToggles" class="hint" style="margin-top: 6px;"></div>
+      </div>
+      <div class="row">
+        <button class="mod-primary" id="saveBtn" type="button">Save Config</button>
+        <button id="createSetupBtn" type="button">Create Setup Card</button>
+        <button id="importBtn" type="button">Import + Archive</button>
+      </div>
+      <p class="hint">Create setup card -> fill values in card description -> Import + Archive.</p>
+      <p class="status" id="status"></p>
+    </div>
+    <script src="./settings.js?v=20260418b"></script>
+  </body>
+</html>

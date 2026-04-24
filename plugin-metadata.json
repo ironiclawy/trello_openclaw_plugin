@@ -1,0 +1,17 @@
+{
+  "name": "openclaw-plugin-trello",
+  "displayName": "OpenClaw Trello Plugin",
+  "version": "1.0.0",
+  "description": "Trello automation channel plugin for OpenClaw with hardened webhook ingress, workflow controls, and regression-gated release process.",
+  "entry": "src/index.ts",
+  "runtime": "openclaw",
+  "license": "SEE REPOSITORY LICENSE",
+  "maintainers": [
+    {
+      "name": "Underlord Operators"
+    }
+  ],
+  "compatibility": {
+    "openclaw": ">=1.0.0"
+  }
+}

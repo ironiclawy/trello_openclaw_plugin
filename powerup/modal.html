@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenClaw Stats</title>
+    <link rel="stylesheet" href="https://p.trellocdn.com/power-up.min.css" />
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .card {
+        border: 1px solid #d5d8dc;
+        border-radius: 8px;
+        padding: 10px;
+        background: #f7f8f9;
+      }
+      .label {
+        font-size: 12px;
+        color: #5e6c84;
+      }
+      .value {
+        font-size: 20px;
+        margin-top: 6px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        border-bottom: 1px solid #dfe1e6;
+        padding: 8px 6px;
+        font-size: 13px;
+      }
+      .u-quiet {
+        color: #5e6c84;
+      }
+      .error {
+        color: #ae2a19;
+        margin-top: 10px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+    </style>
+    <script src="https://p.trellocdn.com/power-up.min.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="row">
+        <button class="mod-primary" id="refreshBtn" type="button">Refresh</button>
+        <span class="u-quiet" id="generatedAt">Loading…</span>
+      </div>
+      <div class="grid" id="summary"></div>
+      <h4>Agent Usage</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Dispatches</th>
+            <th>Total Tokens</th>
+            <th>Prompt</th>
+            <th>Completion</th>
+          </tr>
+        </thead>
+        <tbody id="agentRows"></tbody>
+      </table>
+      <div id="error" class="error" style="display:none;"></div>
+    </div>
+    <script src="./modal.js?v=20260418a"></script>
+  </body>
+</html>
