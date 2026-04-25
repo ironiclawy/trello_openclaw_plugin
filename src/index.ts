@@ -4,7 +4,7 @@ import { TrelloAgentRouter } from './router';
 import { TrelloSessionStore } from './session-store';
 import { BoardIds } from './board-setup';
 import { TrelloWebhookHandler } from './webhook';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import path from 'path';
 import { createHmac, timingSafeEqual } from 'crypto';
 import {
@@ -17,13 +17,15 @@ import {
   TrelloShoppingAutomationConfig,
 } from './types';
 import { createTrelloTools } from './tools';
+import { buildDemoScriptWorkflowResponse, matchDemoScriptPrompt } from './demo-script';
 
 export { TrelloPluginConfig } from './types';
 
 const THRESHOLD_MARKER = '#target-threshold-met';
 const READY_CHECKOUT_LABEL_NAME = 'Ready to checkout';
 const GENERATED_IMAGE_DIR = '/tmp/openclaw-trello-generated-images';
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || path.join(process.cwd(), '.openclaw');
+const OPENCLAW_HOME = process.env.OPENCLAW_HOME
+  || (existsSync('/home/node/.openclaw') ? '/home/node/.openclaw' : path.join(process.cwd(), '.openclaw'));
 const OPENCLAW_WORKSPACE_DIR = process.env.OPENCLAW_WORKSPACE_DIR || path.join(OPENCLAW_HOME, 'workspace');
 const OPENCLAW_MEDIA_DIR = process.env.OPENCLAW_MEDIA_DIR || path.join(OPENCLAW_HOME, 'media/tool-image-generation');
 
@@ -342,18 +344,22 @@ const WORKFLOW_ALLOWED_OPS = new Set([
   'attach_self',
   'assign_self',
   'create_card',
+  'update_description',
   'move_card',
   'set_dates',
   'add_member',
+  'add_creator_member',
   'remove_member',
   'set_members',
   'add_label',
   'remove_label',
+  'add_checklist_item',
   'update_checklist_item',
   'complete_checklist_item',
   'add_comment',
   'update_comment',
   'attach_link',
+  'attach_remote_file',
   'mark_complete',
   'archive_card',
 ]);
@@ -380,6 +386,8 @@ const WORKFLOW_ALLOWED_KEYS = new Set([
   'commentMatchText',
   'url',
   'filename',
+  'mimeType',
+  'setAsCover',
   // legacy aliases accepted for compatibility
   'desc',
   'text',
@@ -536,6 +544,7 @@ function validateWebhookPayloadForBoard(payload: any): { ok: boolean; reason?: s
 const WEBHOOK_DEDUPE_TTL_MS = Math.max(10_000, Number(process.env.TRELLO_WEBHOOK_DEDUPE_TTL_MS || 5 * 60_000));
 const WEBHOOK_DEDUPE_MAX_SIZE = Math.max(100, Number(process.env.TRELLO_WEBHOOK_DEDUPE_MAX_SIZE || 2000));
 const WEBHOOK_METRICS_LOG_INTERVAL_MS = Math.max(15_000, Number(process.env.TRELLO_WEBHOOK_METRICS_LOG_INTERVAL_MS || 60_000));
+const BACKLOG_RECOVERY_RECHECK_MS = Math.max(10_000, Number(process.env.TRELLO_BACKLOG_RECOVERY_RECHECK_MS || 30_000));
 
 const webhookSeenEvents = new Map<string, number>();
 const webhookInFlightEvents = new Set<string>();
@@ -646,14 +655,30 @@ async function dispatchToOpenClawAgent(agentId: string, message: string, session
   let runtimeCfg: any = null;
   try {
     const fs = require('fs');
-    const raw = fs.readFileSync(path.join(OPENCLAW_HOME, 'openclaw.json'), 'utf8');
-    runtimeCfg = JSON.parse(raw);
+    const configCandidates = [
+      path.join(OPENCLAW_HOME, 'openclaw.json'),
+      '/home/node/.openclaw/openclaw.json',
+      '/root/.openclaw/openclaw.json',
+    ];
+
+    for (const cfgPath of configCandidates) {
+      try {
+        if (!fs.existsSync(cfgPath)) continue;
+        const raw = fs.readFileSync(cfgPath, 'utf8');
+        runtimeCfg = JSON.parse(raw);
+        break;
+      } catch {
+        // Try next candidate.
+      }
+    }
   } catch (_err) {
     runtimeCfg = null;
   }
 
   const GATEWAY_TOKEN = (() => {
     if (process.env.OPENCLAW_GATEWAY_TOKEN) return process.env.OPENCLAW_GATEWAY_TOKEN;
+    if (process.env.GATEWAY_AUTH_TOKEN) return process.env.GATEWAY_AUTH_TOKEN;
+    if (process.env.OPENCLAW_TOKEN) return process.env.OPENCLAW_TOKEN;
     const token = runtimeCfg?.gateway?.auth?.token;
     if (typeof token === 'string' && token.length > 0) return token;
     return '';
@@ -1053,8 +1078,15 @@ export class TrelloChannel {
   private processedShoppingCommentIds = new Set<string>();
   private readyCheckoutLabelIdsByBoardId = new Map<string, string>();
   private labelSignatureByCardId = new Map<string, string>();
-  private seenBacklogRecoveryCheckedIds = new Set<string>();
+  private lastRecoveryCheckAtByCardId = new Map<string, number>();
+  private lastSeenListIdByCardId = new Map<string, string>();
+  private lastProcessedListMoveActionByCardId = new Map<string, string>();
   private boardPowerupConfigCache = new Map<string, { expiresAt: number; config: any }>();
+  private activeRoutedCards = new Set<string>();
+  private lastRoutedFingerprintByCardId = new Map<string, { fingerprint: string; at: number }>();
+
+  private readonly routedEventDedupWindowMs = 120_000;
+  private readonly finalCommentDedupWindowMs = 600_000;
 
   private dispatchToAgent!: (agentId: string, message: string, sessionId: string, cardId?: string) => Promise<string>;
 
@@ -1115,6 +1147,11 @@ export class TrelloChannel {
       store: this.store,
       client: this.client,
       botMemberId,
+      isAutomationMember: async (boardId: string, memberId: string) => {
+        const targetBoardId = String(boardId || '').trim() || this.getPrimaryBoardId();
+        const automationIds = await this.getConfiguredAutomationMemberIds(targetBoardId);
+        return automationIds.has(String(memberId || '').trim());
+      },
       onRoutedEvent: (event) => this.handleRoutedEvent(event),
       onChecklistItemAdded: (event) => this.handleChecklistItemAdded(event),
       onShoppingComment: (event) => this.handleShoppingComment(event),
@@ -1271,6 +1308,7 @@ export class TrelloChannel {
       const watchedListIds = this.watchedListIdsByBoardId.get(boardId) || new Set<string>();
       const cards = await this.client.getBoardCards(boardId);
       for (const card of cards) {
+        this.lastSeenListIdByCardId.set(card.id, card.idList);
         if (watchedListIds.has(card.idList)) {
           this.backlogSeenCardIds.add(card.id);
         }
@@ -1300,6 +1338,19 @@ export class TrelloChannel {
       for (const boardId of this.watchedBoardIds) {
       const cards = await this.client.getBoardCards(boardId);
       const watchedListIds = this.watchedListIdsByBoardId.get(boardId) || new Set<string>();
+      const movedBacklogCards: Array<{ id: string; name: string; idList: string }> = [];
+
+      for (const card of cards) {
+        const previousListId = this.lastSeenListIdByCardId.get(card.id);
+        this.lastSeenListIdByCardId.set(card.id, card.idList);
+
+        if (!previousListId || previousListId === card.idList) continue;
+        if (!watchedListIds.has(card.idList)) continue;
+
+        // Re-open intake eligibility when a card is moved to another watched list.
+        this.lastRecoveryCheckAtByCardId.delete(card.id);
+        movedBacklogCards.push(card);
+      }
 
       // Detect label edits on any existing card and remap list accordingly.
       for (const boardCard of cards) {
@@ -1326,20 +1377,30 @@ export class TrelloChannel {
 
         const newBacklogCards = backlogCards.filter(card => !this.backlogSeenCardIds.has(card.id));
         const recoveryBacklogCards: Array<{ id: string; name: string; idList: string }> = [];
+        const now = Date.now();
         for (const card of backlogCards) {
           if (!this.backlogSeenCardIds.has(card.id)) continue;
-          if (this.seenBacklogRecoveryCheckedIds.has(card.id)) continue;
           if (this.store.get(card.id)) continue;
+
+          const movedIntoWatchedList = await this.hasUnprocessedMoveIntoList(card.id, card.idList);
+          if (movedIntoWatchedList) {
+            recoveryBacklogCards.push(card);
+            continue;
+          }
+
+          const lastRecoveryCheckAt = this.lastRecoveryCheckAtByCardId.get(card.id) || 0;
+          if ((now - lastRecoveryCheckAt) < BACKLOG_RECOVERY_RECHECK_MS) continue;
+          this.lastRecoveryCheckAtByCardId.set(card.id, now);
           try {
             const shouldRecover = await this.shouldRecoverSeenBacklogCard(card.id);
-            this.seenBacklogRecoveryCheckedIds.add(card.id);
             if (shouldRecover) recoveryBacklogCards.push(card);
           } catch (err) {
             console.error(`[TrelloChannel] Recovery check failed for card ${card.id}:`, err);
           }
         }
 
-        const candidateBacklogCards = [...newBacklogCards, ...recoveryBacklogCards];
+        const candidateBacklogCards = [...newBacklogCards, ...recoveryBacklogCards, ...movedBacklogCards]
+          .filter((card, idx, arr) => arr.findIndex(other => other.id === card.id) === idx);
 
         for (const card of candidateBacklogCards) {
         this.backlogSeenCardIds.add(card.id);
@@ -1472,22 +1533,41 @@ export class TrelloChannel {
     return cardMemberIds.some(memberId => configuredAutomationIds.has(memberId));
   }
 
-    private async shouldRecoverSeenBacklogCard(cardId: string): Promise<boolean> {
-      const fullCard = await this.client.getCard(cardId);
-      if (this.isPromptInstructionCard(fullCard)) return false;
+  private async hasUnprocessedMoveIntoList(cardId: string, targetListId: string): Promise<boolean> {
+    try {
+      const latestMove = await this.client.getLatestCardListMoveAction(cardId);
+      if (!latestMove?.id) return false;
 
-      const comments = await this.client.getCardComments(cardId, 30);
-      const hasBotComment = comments.some((action: any) => {
-        const creatorId = String(action?.memberCreator?.id || '').trim();
-        return !!this.botMemberId && creatorId === this.botMemberId;
-      });
-      if (hasBotComment) return false;
+      const movedIntoListId = String(latestMove.data?.listAfter?.id || '').trim();
+      if (!movedIntoListId || movedIntoListId !== String(targetListId || '').trim()) return false;
 
-      const desc = String(fullCard?.desc || '');
-      if (/## Research Output/i.test(desc)) return false;
+      const lastProcessedActionId = this.lastProcessedListMoveActionByCardId.get(cardId);
+      if (lastProcessedActionId && lastProcessedActionId === latestMove.id) return false;
 
+      this.lastProcessedListMoveActionByCardId.set(cardId, latestMove.id);
       return true;
+    } catch (err) {
+      console.error(`[TrelloChannel] Failed move-action check for card ${cardId}:`, err);
+      return false;
     }
+  }
+
+  private async shouldRecoverSeenBacklogCard(cardId: string): Promise<boolean> {
+    const fullCard = await this.client.getCard(cardId);
+    if (this.isPromptInstructionCard(fullCard)) return false;
+
+    const comments = await this.client.getCardComments(cardId, 30);
+    const hasBotComment = comments.some((action: any) => {
+      const creatorId = String(action?.memberCreator?.id || '').trim();
+      return !!this.botMemberId && creatorId === this.botMemberId;
+    });
+    if (hasBotComment) return false;
+
+    const desc = String(fullCard?.desc || '');
+    if (/## Research Output/i.test(desc)) return false;
+
+    return true;
+  }
 
   private async processShoppingPollTick(): Promise<void> {
     if (this.shoppingPollInFlight) return;
@@ -1995,10 +2075,35 @@ export class TrelloChannel {
 
   private async handleRoutedEvent(event: RoutedEvent): Promise<void> {
     const { cardId, agentId, session } = event;
+    if (!event.isFollowUp && this.activeRoutedCards.has(cardId)) {
+      console.log(`[TrelloChannel] Skipping duplicate routed event while session is active cardId=${cardId}`);
+      return;
+    }
+    this.activeRoutedCards.add(cardId);
+
     let text = event.text;
+    if (!event.isFollowUp) {
+      const fingerprint = `${agentId}:${String(text || '').trim().toLowerCase()}`;
+      const now = Date.now();
+      const previous = this.lastRoutedFingerprintByCardId.get(cardId);
+      if (previous && (now - previous.at) < this.routedEventDedupWindowMs) {
+        console.log(`[TrelloChannel] Skipping duplicate routed event in dedup window cardId=${cardId}`);
+        this.activeRoutedCards.delete(cardId);
+        return;
+      }
+      this.lastRoutedFingerprintByCardId.set(cardId, { fingerprint, at: now });
+    }
+
     const creatorAssignMode = this.getCreatorAssignModeFromPrompt(text);
     const boardIds = await this.getBoardIdsForCard(cardId);
-    const progressChecklist = await this.ensureLongRunningProgressChecklist(cardId, text);
+    const demoScriptMatchInput = event.isFollowUp
+      ? (this.extractLatestUserCommentFromDispatchText(text) || '')
+      : text;
+    const demoScriptMatch = matchDemoScriptPrompt(demoScriptMatchInput);
+    const shouldSkipProgressChecklist = demoScriptMatch?.id === 'product-launch-announcement';
+    const progressChecklist = shouldSkipProgressChecklist
+      ? undefined
+      : await this.ensureLongRunningProgressChecklist(cardId, text);
     trelloPowerupStats.sessionStarted += 1;
     trelloPowerupStats.activeSessions += 1;
 
@@ -2078,7 +2183,14 @@ export class TrelloChannel {
     }, this.interimThresholdMs);
 
     try {
-      const response = await this.dispatchToAgent(agentId, text, session.cardId, cardId);
+      const response = demoScriptMatch
+        ? buildDemoScriptWorkflowResponse(demoScriptMatch)
+        : await this.dispatchToAgent(agentId, text, session.cardId, cardId);
+
+      if (demoScriptMatch) {
+        console.log(`[TrelloChannel] demo script matched id=${demoScriptMatch.id} cardId=${cardId}`);
+      }
+
       responseSent = true;
       clearTimeout(interimTimer);
 
@@ -2162,7 +2274,11 @@ export class TrelloChannel {
         }
       }
       const safeComment = await this.enforceDemoPassMarkers(cardId, commentText);
-      await this.client.addComment(cardId, safeComment);
+      if (await this.hasRecentIdenticalAutomationComment(cardId, safeComment)) {
+        console.log(`[TrelloChannel] Suppressed duplicate final comment cardId=${cardId}`);
+      } else {
+        await this.client.addComment(cardId, safeComment);
+      }
       if (progressChecklist) {
         await this.completeProgressChecklistItem(cardId, progressChecklist.checklistName, progressChecklist.deliveryItemName);
       }
@@ -2188,7 +2304,43 @@ export class TrelloChannel {
         trelloPowerupStats.activeSessions -= 1;
       }
       this.store.delete(cardId);
+      this.activeRoutedCards.delete(cardId);
     }
+  }
+
+  private extractLatestUserCommentFromDispatchText(text: string): string | undefined {
+    const marker = 'New User Comment:';
+    const raw = String(text || '');
+    const idx = raw.lastIndexOf(marker);
+    if (idx === -1) return undefined;
+
+    const tail = raw.slice(idx + marker.length).trim();
+    if (!tail || tail === '(empty comment)') return undefined;
+    return tail;
+  }
+
+  private async hasRecentIdenticalAutomationComment(cardId: string, text: string): Promise<boolean> {
+    const normalizedTarget = String(text || '').trim();
+    if (!normalizedTarget) return false;
+
+    try {
+      const comments = await this.client.getCardComments(cardId, 10);
+      const now = Date.now();
+      for (const comment of comments) {
+        const body = String(comment?.data?.text || '').trim();
+        if (body !== normalizedTarget) continue;
+
+        const isAutomationAuthor = String(comment?.memberCreator?.id || '').trim() === this.botMemberId;
+        if (!isAutomationAuthor) continue;
+
+        const ts = Date.parse(String(comment?.date || ''));
+        if (!Number.isFinite(ts)) return true;
+        if ((now - ts) <= this.finalCommentDedupWindowMs) return true;
+      }
+    } catch (_err) {
+      return false;
+    }
+    return false;
   }
 
   private async executeWorkflow(baseCardId: string, operations: WorkflowOperation[]): Promise<WorkflowExecutionResult[]> {
@@ -2240,6 +2392,13 @@ export class TrelloChannel {
             results.push({ op, ok: true, detail: `Created card ${(created as any)?.id || 'unknown'} in list ${listId}.` });
             break;
           }
+          case 'update_description': {
+            const desc = String(operation.cardDesc || (operation as any).desc || operation.commentText || (operation as any).text || '').trim();
+            if (!desc) throw new Error('cardDesc (or desc/commentText/text) is required for update_description.');
+            await this.client.updateDescription(cardId, desc);
+            results.push({ op, ok: true, detail: `Updated description for card ${cardId}.` });
+            break;
+          }
           case 'move_card': {
             const listId = await this.resolveListId(operationBoardId, operation.listId, operation.listName);
             await this.client.moveCard(cardId, listId);
@@ -2261,6 +2420,19 @@ export class TrelloChannel {
             await this.client.addMember(cardId, memberId);
             await this.enforceSingleAutomationAgentMember(cardId, memberId);
             results.push({ op, ok: true, detail: `Added member ${memberId}.` });
+            break;
+          }
+          case 'add_creator_member': {
+            const creatorId = await this.resolveCardCreatorMemberId(cardId);
+            if (!creatorId) throw new Error('Card creator member ID could not be resolved.');
+            try {
+              await this.client.addMember(cardId, creatorId);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              if (!message.toLowerCase().includes('already on the card')) throw err;
+            }
+            await this.enforceSingleAutomationAgentMember(cardId, creatorId);
+            results.push({ op, ok: true, detail: `Added card creator ${creatorId}.` });
             break;
           }
           case 'remove_member': {
@@ -2315,6 +2487,38 @@ export class TrelloChannel {
             }
             break;
           }
+          case 'add_checklist_item': {
+            const checklistName = String(operation.checklistName || '').trim();
+            if (!checklistName) throw new Error('checklistName is required for add_checklist_item.');
+
+            const checklistItemName = String(operation.checklistItemName || '').trim();
+            if (!checklistItemName) throw new Error('checklistItemName is required for add_checklist_item.');
+
+            const checklists = await this.client.getCardChecklists(cardId);
+            let matchingChecklists = checklists.filter(item => this.matchesConfiguredValue(item.name, checklistName));
+            let checklist = matchingChecklists[0];
+
+            const existingItem = matchingChecklists
+              .flatMap(item => item.checkItems || [])
+              .find(item => this.matchesConfiguredValue(item.name || '', checklistItemName));
+            if (existingItem?.id) {
+              results.push({ op, ok: true, detail: `Checklist item already exists: ${existingItem.id}.` });
+              break;
+            }
+
+            if (!checklist) {
+              await this.client.createChecklist(cardId, checklistName);
+              matchingChecklists = (await this.client.getCardChecklists(cardId)).filter(item => this.matchesConfiguredValue(item.name, checklistName));
+              checklist = matchingChecklists[0];
+            }
+            if (!checklist?.id) {
+              throw new Error(`Checklist not found or could not be created: ${checklistName}`);
+            }
+
+            await this.client.addChecklistItem(checklist.id, checklistItemName);
+            results.push({ op, ok: true, detail: `Checklist item added to ${checklist.id}.` });
+            break;
+          }
           case 'update_checklist_item': {
             const item = await this.resolveChecklistItem(cardId, operation);
             const nextName = (operation.checklistItemNewName || '').trim();
@@ -2361,20 +2565,94 @@ export class TrelloChannel {
             if (localPath) {
               const data = await fs.readFile(localPath);
               const filename = String(operation.filename || '').trim() || path.basename(localPath) || 'attachment.bin';
+              const existingAttachments = await this.client.getCardAttachments(cardId);
+              const existingByName = existingAttachments.find(att => String(att?.name || '').trim() === filename);
+              if (existingByName) {
+                results.push({ op, ok: true, detail: `Skipped upload; attachment named ${filename} already exists.` });
+                break;
+              }
               const mimeType = this.guessMimeTypeFromFilename(filename);
               const attachment = await this.client.uploadAttachment(cardId, filename, data, mimeType);
               results.push({ op, ok: true, detail: `Uploaded file attachment ${attachment.url}.` });
             } else {
+              const existingAttachments = await this.client.getCardAttachments(cardId);
+              const existingLink = existingAttachments.find(att => String(att?.url || '').trim() === String(operation.url || '').trim());
+              if (existingLink) {
+                results.push({ op, ok: true, detail: `Skipped link attach; ${operation.url} already exists.` });
+                break;
+              }
               const attachment = await this.client.attachLink(cardId, operation.url, operation.filename);
               results.push({ op, ok: true, detail: `Attached link ${attachment.url}.` });
             }
             break;
           }
+          case 'attach_remote_file': {
+            const fileUrl = String(operation.url || '').trim();
+            if (!fileUrl) throw new Error('url is required for attach_remote_file.');
+
+            let parsedUrl: URL;
+            try {
+              parsedUrl = new URL(fileUrl);
+            } catch {
+              throw new Error(`Invalid URL for attach_remote_file: ${fileUrl}`);
+            }
+            if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+              throw new Error(`Unsupported URL protocol for attach_remote_file: ${parsedUrl.protocol}`);
+            }
+
+            const response = await fetch(fileUrl);
+            if (!response.ok) {
+              throw new Error(`Failed downloading remote file: HTTP ${response.status}`);
+            }
+
+            const arrayBuffer = await response.arrayBuffer();
+            const data = Buffer.from(arrayBuffer);
+            if (!data.length) throw new Error('Downloaded remote file is empty.');
+
+            const providedFilename = String(operation.filename || '').trim();
+            const fallbackFilename = path.basename(parsedUrl.pathname || '') || 'attachment.bin';
+            const filename = providedFilename || fallbackFilename;
+
+            const existingAttachments = await this.client.getCardAttachments(cardId);
+            const existingByName = existingAttachments.find(att => String(att?.name || '').trim() === filename);
+            if (existingByName) {
+              const setAsCover = Boolean((operation as any).setAsCover);
+              if (setAsCover) {
+                await this.client.setCardCoverToAttachment(cardId, existingByName.id);
+                results.push({ op, ok: true, detail: `Skipped upload; attachment named ${filename} already exists and was set as cover.` });
+              } else {
+                results.push({ op, ok: true, detail: `Skipped upload; attachment named ${filename} already exists.` });
+              }
+              break;
+            }
+
+            const mimeTypeHeader = String(response.headers.get('content-type') || '').split(';')[0].trim();
+            const mimeType = String((operation as any).mimeType || '').trim() || mimeTypeHeader || this.guessMimeTypeFromFilename(filename);
+
+            const attachment = await this.client.uploadAttachment(cardId, filename, data, mimeType);
+            const setAsCover = Boolean((operation as any).setAsCover);
+            if (setAsCover) {
+              await this.client.setCardCoverToAttachment(cardId, attachment.id);
+              results.push({ op, ok: true, detail: `Uploaded remote file attachment ${attachment.url} and set as cover.` });
+            } else {
+              results.push({ op, ok: true, detail: `Uploaded remote file attachment ${attachment.url}.` });
+            }
+            break;
+          }
           case 'mark_complete': {
             await this.client.markCardComplete(cardId);
-            if (operation.listId || operation.listName || this.config.lists?.done) {
-              const listId = await this.resolveListId(operationBoardId, operation.listId, operation.listName || this.config.lists?.done);
+            const targetDoneList = operation.listName || this.config.lists?.done;
+            if (operation.listId || operation.listName) {
+              const listId = await this.resolveListId(operationBoardId, operation.listId, targetDoneList);
               await this.client.moveCard(cardId, listId);
+            } else if (targetDoneList) {
+              // Best-effort: some boards intentionally do not include a Done list.
+              try {
+                const listId = await this.resolveListId(operationBoardId, undefined, targetDoneList);
+                await this.client.moveCard(cardId, listId);
+              } catch (err) {
+                console.warn(`[TrelloChannel] mark_complete: optional done-list move skipped for ${cardId}:`, err);
+              }
             }
             results.push({ op, ok: true, detail: `Card ${cardId} marked complete.` });
             break;
@@ -2427,6 +2705,9 @@ export class TrelloChannel {
 
     if ('allowCrossCard' in candidate && typeof candidate.allowCrossCard !== 'boolean') {
       throw new Error(`Workflow contract v${WORKFLOW_CONTRACT_VERSION}: operation[${index}].allowCrossCard must be a boolean`);
+    }
+    if ('setAsCover' in candidate && typeof (candidate as any).setAsCover !== 'boolean') {
+      throw new Error(`Workflow contract v${WORKFLOW_CONTRACT_VERSION}: operation[${index}].setAsCover must be a boolean`);
     }
     if ('memberIds' in candidate) {
       const memberIds = candidate.memberIds;
@@ -2604,6 +2885,7 @@ export class TrelloChannel {
     if (normalized === 'update_checklist_item' || normalized === 'complete_checklist_item') return 'updating checklist items';
     if (normalized === 'add_comment' || normalized === 'update_comment') return 'comment interactions';
     if (normalized === 'attach_link') return 'attaching links';
+    if (normalized === 'attach_remote_file') return 'downloading and uploading remote files';
     if (normalized === 'mark_complete') return 'marking cards complete';
     if (normalized === 'archive_card') return 'archiving cards';
     return '';
@@ -2778,16 +3060,35 @@ export class TrelloChannel {
       const query = new URLSearchParams({
         key: this.config.auth.apiKey,
         token: this.config.auth.token,
-        filter: 'createCard',
-        limit: '1',
+        // Cards may be created by copy flow, which emits copyCard instead of createCard.
+        filter: 'createCard,copyCard,convertToCardFromCheckItem,moveCardToBoard',
+        limit: '20',
       });
       const response = await fetch(`https://api.trello.com/1/cards/${cardId}/actions?${query.toString()}`);
       if (!response.ok) {
         throw new Error(`Trello API error ${response.status}: ${await response.text()}`);
       }
-      const actions = await response.json() as Array<{ memberCreator?: { id?: string } }>;
-      const creatorId = String(actions?.[0]?.memberCreator?.id || '').trim();
-      return creatorId || undefined;
+      const actions = await response.json() as Array<{ type?: string; date?: string; memberCreator?: { id?: string } }>;
+      const candidate = (actions || [])
+        .filter(action => {
+          const t = String(action?.type || '').trim().toLowerCase();
+          return t === 'createcard' || t === 'copycard' || t === 'converttocardfromcheckitem' || t === 'movecardtoboard';
+        })
+        .sort((a, b) => Date.parse(String(b?.date || 0)) - Date.parse(String(a?.date || 0)))[0];
+
+      const creatorId = String(candidate?.memberCreator?.id || '').trim();
+      if (creatorId) return creatorId;
+
+      // Last-resort fallback: infer intent owner from latest human comment on card.
+      const comments = await this.client.getCardComments(cardId, 20);
+      const latestHumanComment = comments.find(comment => {
+        const memberId = String(comment?.memberCreator?.id || '').trim();
+        if (!memberId) return false;
+        if (this.botMemberId && memberId === this.botMemberId) return false;
+        return true;
+      });
+      const fallbackMemberId = String(latestHumanComment?.memberCreator?.id || '').trim();
+      return fallbackMemberId || undefined;
     } catch (err) {
       console.error(`[TrelloChannel] Failed to resolve card creator for ${cardId}:`, err);
       return undefined;

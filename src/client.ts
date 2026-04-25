@@ -273,13 +273,25 @@ export class TrelloClient {
     await this.request('PUT', `/1/cards/${cardId}/checkItem/${checkItemId}`, { state });
   }
 
-  async getCardComments(cardId: string, limit = 100): Promise<Array<{ id: string; data?: { text?: string } }>> {
-    return this.request<Array<{ id: string; data?: { text?: string } }>>(
+  async getCardComments(cardId: string, limit = 100): Promise<Array<{ id: string; date?: string; memberCreator?: { id?: string }; data?: { text?: string } }>> {
+    return this.request<Array<{ id: string; date?: string; memberCreator?: { id?: string }; data?: { text?: string } }>>(
       'GET',
       `/1/cards/${cardId}/actions`,
       undefined,
       { filter: 'commentCard', limit: String(limit) },
     );
+  }
+
+  async getLatestCardListMoveAction(
+    cardId: string,
+  ): Promise<{ id: string; date?: string; data?: { listBefore?: { id?: string }; listAfter?: { id?: string } } } | undefined> {
+    const actions = await this.request<Array<{ id: string; date?: string; data?: { listBefore?: { id?: string }; listAfter?: { id?: string } } }>>(
+      'GET',
+      `/1/cards/${cardId}/actions`,
+      undefined,
+      { filter: 'updateCard:idList', limit: '1' },
+    );
+    return actions[0];
   }
 
   async getCardCreationAction(

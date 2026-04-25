@@ -10,6 +10,12 @@ Current managed files:
 - `src/index.ts`
 - `src/client.ts`
 - `src/tools.ts`
+- `src/demo-script.ts`
+- `src/webhook.ts`
+
+Demo scripting:
+- `src/demo-script.ts` defines canned prompt-to-workflow mappings for repeatable mock demos.
+- If an incoming card prompt matches a configured demo script pattern, the plugin executes scripted workflow operations instead of dispatching to the live agent model.
 
 ## Capability Matrix
 
