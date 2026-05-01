@@ -1,10 +1,12 @@
-# openclaw-plugin-trello Overrides
+# openclaw-plugin-trello Standalone Plugin and Overlay Guide
 
-Canonical override source for the live OpenClaw Trello plugin runtime files.
+Canonical source for the OpenClaw Trello plugin.
+
+This repository now contains a self-contained plugin package (including internal modules and build metadata), and can also still be used as an overlay source for an already-installed runtime extension.
 
 ## Scope
 
-This folder stores maintained overrides for selected runtime source files.
+This folder stores the maintained plugin source files used for standalone builds and runtime overlays.
 
 Current managed files:
 - `src/index.ts`
@@ -12,6 +14,113 @@ Current managed files:
 - `src/tools.ts`
 - `src/demo-script.ts`
 - `src/webhook.ts`
+
+## Installation Paths
+
+Use one of these installation paths depending on your environment.
+
+### Path A: Standalone Plugin Install (Recommended for Fresh Hosts)
+
+Use this on a new VPS/host when you want this repository to be the source of truth.
+
+1. Clone this repository on the target host.
+2. Install dependencies.
+3. Build the plugin.
+4. Copy resulting source/dist into your OpenClaw extension location (or replace existing extension tree).
+5. Restart OpenClaw.
+
+Example:
+
+```bash
+git clone https://github.com/<your-org>/trello_openclaw_plugin.git
+cd trello_openclaw_plugin
+npm ci
+npm run build
+
+# Example runtime install path:
+mkdir -p /home/node/.openclaw/extensions/openclaw-plugin-trello
+rsync -a --delete ./ /home/node/.openclaw/extensions/openclaw-plugin-trello/
+
+# restart your OpenClaw service/container here
+```
+
+### Path B: Existing Runtime Overlay (Current Method)
+
+Use this when your OpenClaw instance already has a working `openclaw-plugin-trello` extension tree.
+
+1. Copy managed source files into the existing runtime extension directory.
+2. Build extension code in place.
+3. Restart OpenClaw.
+
+Example:
+
+```bash
+docker cp src/index.ts openclaw:/home/node/.openclaw/extensions/openclaw-plugin-trello/src/index.ts
+docker cp src/client.ts openclaw:/home/node/.openclaw/extensions/openclaw-plugin-trello/src/client.ts
+docker cp src/tools.ts openclaw:/home/node/.openclaw/extensions/openclaw-plugin-trello/src/tools.ts
+docker cp src/demo-script.ts openclaw:/home/node/.openclaw/extensions/openclaw-plugin-trello/src/demo-script.ts
+docker cp src/webhook.ts openclaw:/home/node/.openclaw/extensions/openclaw-plugin-trello/src/webhook.ts
+
+docker exec openclaw sh -lc 'cd /home/node/.openclaw/extensions/openclaw-plugin-trello && npm run build'
+docker restart openclaw
+```
+
+### Path C: Base-Extension Bootstrap from Known-Good Runtime
+
+Use this when you want to clone an already-proven runtime extension tree exactly (for fast migration parity).
+
+Important:
+- This is a migration shortcut, not a requirement for fresh installs.
+- If you use Path A, this repository already contains the modules needed for a standalone build.
+
+Recommended bootstrap flow:
+
+1. Seed a full plugin extension directory from a known-good OpenClaw instance.
+
+Source host:
+
+```bash
+docker exec openclaw sh -lc 'cd /home/node/.openclaw/extensions && tar -czf /tmp/openclaw-plugin-trello-full.tgz openclaw-plugin-trello'
+docker cp openclaw:/tmp/openclaw-plugin-trello-full.tgz ./openclaw-plugin-trello-full.tgz
+```
+
+2. Transfer `openclaw-plugin-trello-full.tgz` to the target host.
+
+3. Extract on target host into OpenClaw extension path.
+
+Target host:
+
+```bash
+mkdir -p /home/node/.openclaw/extensions
+tar -xzf openclaw-plugin-trello-full.tgz -C /home/node/.openclaw/extensions
+```
+
+4. Apply this repo's managed overrides to that full plugin tree.
+
+```bash
+cp src/index.ts /home/node/.openclaw/extensions/openclaw-plugin-trello/src/index.ts
+cp src/client.ts /home/node/.openclaw/extensions/openclaw-plugin-trello/src/client.ts
+cp src/tools.ts /home/node/.openclaw/extensions/openclaw-plugin-trello/src/tools.ts
+cp src/demo-script.ts /home/node/.openclaw/extensions/openclaw-plugin-trello/src/demo-script.ts
+cp src/webhook.ts /home/node/.openclaw/extensions/openclaw-plugin-trello/src/webhook.ts
+```
+
+5. Build and restart OpenClaw.
+
+```bash
+cd /home/node/.openclaw/extensions/openclaw-plugin-trello
+npm run build
+# restart your OpenClaw service/container here
+```
+
+Quick sanity check before build (fresh host):
+
+```bash
+ls /home/node/.openclaw/extensions/openclaw-plugin-trello/src/auth
+ls /home/node/.openclaw/extensions/openclaw-plugin-trello/src/router.ts
+```
+
+If those do not exist, your base plugin seed is incomplete.
 
 Demo scripting:
 - `src/demo-script.ts` defines canned prompt-to-workflow mappings for repeatable mock demos.

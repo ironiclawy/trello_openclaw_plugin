@@ -1,0 +1,56 @@
+{
+  "id": "openclaw-plugin-trello",
+  "name": "Trello Channel",
+  "version": "0.1.0",
+  "description": "Trello as a first-class bidirectional communication channel for OpenClaw",
+  "type": "channel",
+  "extensions": ["./dist/index.js"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "auth": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["apikey"] },
+          "apiKey": { "type": "string" },
+          "token": { "type": "string" }
+        },
+        "required": ["type", "apiKey", "token"]
+      },
+      "boardId": { "type": "string" },
+      "webhookCallbackUrl": { "type": "string" },
+      "lists": {
+        "type": "object",
+        "properties": {
+          "backlog": { "type": "string" },
+          "inProgress": { "type": "string" },
+          "done": { "type": "string" }
+        },
+        "required": ["backlog", "inProgress", "done"]
+      },
+      "agentLabels": {
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      },
+      "defaultAgent": { "type": "string" },
+      "interimResponseThresholdMs": { "type": "number" },
+      "shoppingAutomation": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "cardName": { "type": "string" },
+          "checklistName": { "type": "string" },
+          "minimumSubtotal": { "type": "number" },
+          "targetWeb": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "pricingAgentId": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -51,7 +51,7 @@ const DEFAULT_PLUGIN_CONFIG: TrelloPluginConfig = {
     minimumSubtotal: 35,
     targetWeb: {
       enabled: false,
-      pricingAgentId: 'ironiclawy',
+      pricingAgentId: 'main',
       pollIntervalMs: 15000,
     },
   },
@@ -1897,7 +1897,7 @@ export class TrelloChannel {
     cardId: string,
     automation: TrelloShoppingAutomationConfig,
   ): Promise<{ lineTotal: number; unitPrice: number; productTitle?: string; productUrl?: string }> {
-    const agentId = automation.targetWeb.pricingAgentId || this.config.defaultAgent || 'ironiclawy';
+    const agentId = automation.targetWeb.pricingAgentId || this.config.defaultAgent || 'main';
     const strictPrompt = [
       'Find a likely current price for this shopping list item on target.com.',
       `Item: ${baseName}`,
